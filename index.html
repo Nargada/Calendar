@@ -11,8 +11,9 @@
 <meta name="apple-mobile-web-app-title" content="备忘录日历">
 <meta name="description" content="说一句话自动排进日历，到点提醒你决定完成还是延迟。数据只存在本机。">
 <link rel="manifest" href="./manifest.webmanifest">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2714%27 fill=%27%234f5bd5%27/%3E%3Ctext x=%2732%27 y=%2744%27 font-size=%2734%27 text-anchor=%27middle%27%3E%F0%9F%93%94%3C/text%3E%3C/svg%3E">
-<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 180 180%27%3E%3Crect width=%27180%27 height=%27180%27 rx=%2740%27 fill=%27%234f5bd5%27/%3E%3Ctext x=%2790%27 y=%27124%27 font-size=%2796%27 text-anchor=%27middle%27%3E%F0%9F%93%94%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="./icon-192.png">
+<link rel="icon" sizes="512x512" href="./icon-512.png">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <title>备忘录日历 · 自然语言自动排程</title>
 <style>
 :root{
@@ -920,6 +921,46 @@ function sortMemos(a, b) {
 }
 
 /* ---------------------- 提醒引擎 ---------------------- */
+/* ---------- 兜底提醒：震动 + 提示音（浏览器不支持系统通知时唯一的"叫醒"手段） ---------- */
+let __audioCtx = null;
+function beep(times) {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!__audioCtx) __audioCtx = new AC();
+    const ctx = __audioCtx;
+    if (ctx.state === "suspended") ctx.resume();
+    const n = Math.max(1, times || 2);
+    for (let i = 0; i < n; i++) {
+      const t0 = ctx.currentTime + i * 0.28;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(880, t0);
+      osc.frequency.setValueAtTime(1320, t0 + 0.09);
+      gain.gain.setValueAtTime(0.0001, t0);
+      gain.gain.exponentialRampToValueAtTime(0.28, t0 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.22);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(t0);
+      osc.stop(t0 + 0.24);
+    }
+  } catch (e) { /* 没有音频权限就静默跳过 */ }
+}
+function vibrate(pattern) {
+  try { if (navigator.vibrate) navigator.vibrate(pattern || [220, 110, 220, 110, 320]); } catch (e) {}
+}
+/* 首次用户操作时解锁音频（浏览器自动播放策略要求） */
+function unlockAudio() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!__audioCtx) __audioCtx = new AC();
+    if (__audioCtx.state === "suspended") __audioCtx.resume();
+  } catch (e) {}
+}
+/* 同一档位只响一次，避免轮询重复打扰 */
+const RANG_AT = new Map();
 /* 提醒时刻 = 事项当天的时间 - 提前分钟数；全天事项按上午 9:00 提醒 */
 function remindTime(memo) {
   const lead = memo.remindMin == null ? DEFAULT_REMIND : memo.remindMin;
@@ -969,7 +1010,7 @@ function requestNotifyPerm(silent) {
   }
   if (Notification.permission === "granted") return Promise.resolve(true);
   if (Notification.permission === "denied") {
-    if (!silent) toast("通知权限已被拒绝，请在浏览器站点设置里改为「允许」", "err");
+    if (!silent) toast("通知权限被拒绝了。点地址栏左侧的锁/信息图标 → 通知 → 允许；或用 Chrome 打开本页", "err");
     return Promise.resolve(false);
   }
   if (silent) return Promise.resolve(false);                   // 静默模式不主动弹权限框
@@ -1013,6 +1054,13 @@ function checkAlerts(force) {
     if (!openAlerts.some(x => x.id === m.id)) openAlerts.push(m);
   });
   if (fresh.length) {
+    /* 应用内兜底提醒：震动 + 提示音（页面可见时才响，避免后台重复吵） */
+    const ring = fresh.filter(f => RANG_AT.get(f.memo.id) !== f.band);
+    if (ring.length && typeof document !== "undefined" && document.visibilityState === "visible") {
+      ring.forEach(f => RANG_AT.set(f.memo.id, f.band));
+      vibrate(ring.length > 1 ? [300, 120, 300, 120, 400] : null);
+      beep(ring.length > 1 ? 3 : 2);
+    }
     fresh.slice(0, 3).forEach(f => sysNotify(f.memo, f.band));
     if (!$("#alarmMask").classList.contains("on")) showAlarm(); else renderAlarm();
     if (force) toast("有 " + fresh.length + " 项需要你处理");
@@ -1657,6 +1705,9 @@ function bind() {
     setRemindUI(+b.dataset.min);
     if (+b.dataset.min >= 0) requestNotifyPerm();
   }));
+
+  /* 任意首次点击解锁音频，之后提醒才能响 */
+  document.addEventListener("click", unlockAudio, { once: true });
 
   /* ---------- 手机版：当天面板做成底部抽屉 ---------- */
   window.__closeSheet = () => { $("#dayPanel").classList.remove("open"); $("#sheetBackdrop").classList.remove("on"); };

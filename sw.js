@@ -1,6 +1,6 @@
-/* 备忘录日历 · Service Worker：让手机可离线打开、可装到主屏幕 */
+﻿/* 备忘录日历 · Service Worker：让手机可离线打开、可装到主屏幕 */
 const CACHE = "memo-calendar-v1";
-const CORE = ["./", "./index.html", "./manifest.webmanifest"];
+const CORE = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {
   self.skipWaiting();
