@@ -568,6 +568,12 @@ select:focus,input:focus{border-color:var(--pri)}
       <button class="btn" id="alarmSnoozeAll">全部延迟 10 分钟</button>
       <button class="btn primary" id="alarmLater">稍后处理</button>
     </div>
+    <div class="modal-f" style="border-top:0;background:transparent;padding-top:0">
+      <span style="font-size:12px;color:var(--tx3);margin-right:auto">通知没反应？</span>
+      <button class="btn sm ghost" id="btnNotifyStatus">查看通知状态</button>
+      <button class="btn sm ghost" id="btnNotifyTest">发一条测试通知</button>
+      <button class="btn sm ghost" id="btnTestAlarm">造一条测试提醒</button>
+    </div>
   </div>
 </div>
 
@@ -921,6 +927,19 @@ function sortMemos(a, b) {
 }
 
 /* ---------------------- 提醒引擎 ---------------------- */
+/* 通知自检用的状态文案 */
+const NOTICE = {
+  nosupport: "这个浏览器没有通知接口，只能用应用内提醒",
+  insecure: "当前不是 HTTPS 安全上下文，浏览器不允许发通知",
+  default: "还没授权：点「开启通知权限」，然后在弹出的框里选「允许」",
+  denied: "权限被浏览器阻止了：点地址栏左侧的锁 / 信息图标 → 通知 → 允许，然后刷新页面",
+  hidden: "权限正常 ✅ —— 页面在后台或最小化时才会弹系统通知",
+  visible: "权限正常 ✅ —— 但页面正在前台，前台只弹应用内窗口；切到别的标签页或最小化再试",
+  sent: "已发送测试通知，请看屏幕右下角（或系统通知中心）",
+  failed: "发送失败："
+};
+const OLD_NOTIFY_DAYS = 7;      // 超过这么多天的旧事项不再弹窗打扰
+
 /* ---------- 兜底提醒：震动 + 提示音（浏览器不支持系统通知时唯一的"叫醒"手段） ---------- */
 let __audioCtx = null;
 function beep(times) {
@@ -1047,6 +1066,7 @@ function checkAlerts(force) {
     if (m.done || m.remindMin === -1) return;
     const band = alertBand(m, now);
     if (!band) return;
+    if (band === 3 && (now - expireTime(m)) > OLD_NOTIFY_DAYS * 86400000) return;   // 太久远的旧账不再打扰
     const key = band + "@" + (snoozeFire(m) || remindTime(m));
     if (NOTIFIED_AT.get(m.id) === key) return;
     NOTIFIED_AT.set(m.id, key);
@@ -1127,6 +1147,57 @@ function showAlarm() {
   $("#alarmMask").classList.add("on");
 }
 function closeAlarm() { $("#alarmMask").classList.remove("on"); }
+
+/* ---------- 通知自检：查明为什么"点了没反应" / 通知不弹 ---------- */
+function notifyStatusText() {
+  if (!notifySupported()) return NOTICE.nosupport;
+  if (!(typeof window !== "undefined" && window.isSecureContext)) return NOTICE.insecure;
+  if (Notification.permission === "denied") return NOTICE.denied;
+  if (Notification.permission === "default") return NOTICE.default;
+  return document.visibilityState === "hidden" ? NOTICE.hidden : NOTICE.visible;
+}
+function showNotice() {
+  const st = notifyStatusText();
+  const ok = st.indexOf("正常") >= 0;
+  toast(st, ok ? "" : "err");
+  return st;
+}
+function testNotice() {
+  if (!notifySupported()) { toast(NOTICE.nosupport, "err"); return; }
+  if (!window.isSecureContext) { toast(NOTICE.insecure, "err"); return; }
+  if (Notification.permission !== "granted") {
+    toast(notifyStatusText(), "err");
+    if (Notification.permission === "default") requestNotifyPerm().then(ok => { if (ok) testNotice(); });
+    return;
+  }
+  try {
+    const n = new Notification("📔 测试通知 · 备忘录日历", {
+      body: "看到这条说明系统通知是通的。到点时会这样弹给你，并附带「完成 / 延迟」窗口。",
+      tag: "memo-selftest", requireInteraction: true
+    });
+    n.onclick = function () { try { window.focus(); } catch (e) {} showAlarm(); n.close(); };
+    toast(NOTICE.sent);
+  } catch (e) { toast(NOTICE.failed + e.message, "err"); }
+}
+/* 造一个"正在进行"的测试事项，用真实弹窗流程验证一遍 */
+function testAlarmFlow() {
+  const now = new Date();
+  const cur = now.getHours() * 60 + now.getMinutes();
+  const t = cur > 4 ? new Date(now.getTime() - 60000) : now;   // 1 分钟前开始，避免跨天
+  const m = addMemo({
+    title: "🔔 提醒测试（可直接点完成）",
+    date: fmtDate(t),
+    time: { h: t.getHours(), m: t.getMinutes() },
+    remindMin: 0,
+    note: "这条是测试用的，确认完可以删掉"
+  });
+  openAlerts.push(m);
+  renderAlarm();
+  showAlarm();
+  syncBell();
+  toast("已生成测试提醒，试试点「完成」或「延迟」");
+  return m;
+}
 function markDone(memo) {
   memo.done = true;
   memo.snoozeUntil = 0;
@@ -1659,8 +1730,15 @@ function bind() {
   /* ---------- 铃铛 / 汇总提醒弹窗 ---------- */
   $("#btnBell").addEventListener("click", () => {
     if (openAlerts.length) { showAlarm(); return; }
-    if (canNotify()) { toast("到点提醒已开启 ✅"); return; }
-    requestNotifyPerm().then(ok => toast(ok ? "到点提醒已开启 ✅" : "没有拿到通知权限，可到浏览器站点设置里允许", ok ? "" : "err"));
+    showNotice();                                  // 没待处理时：明确告诉你当前是什么状态
+  });
+  $("#btnNotifyStatus").addEventListener("click", showNotice);
+  $("#btnNotifyTest").addEventListener("click", testNotice);
+  $("#btnTestAlarm").addEventListener("click", () => {
+    closeAlarm();
+    if (!notifySupported() || Notification.permission !== "granted") {
+      requestNotifyPerm().then(() => testAlarmFlow());
+    } else testAlarmFlow();
   });
   $("#alarmClose").addEventListener("click", closeAlarm);
   $("#alarmLater").addEventListener("click", closeAlarm);
